@@ -50,6 +50,7 @@ initBB = []
 tracking_num = 20
 process_length = 3
 process_tracking_num = []
+knn_numbers = [0, 0, 0]
 process_to_insert = 0
 knn_update = False
 # if a video path was not supplied, grab the reference to the web cam
@@ -89,7 +90,8 @@ def get_point(event, x, y, flags, param):
     global truex, truey, knn_update, tracking_object
     print("initial knn")
     if event == cv2.EVENT_LBUTTONDOWN:
-        knn_update = True
+        if knn_update == True:
+            return 
         truex, truey = x, y
         for values in tracking_object.values():
             if  values.inbox(truex, truey):
@@ -98,10 +100,13 @@ def get_point(event, x, y, flags, param):
                     key = cv2.waitKey(0) & 0xFF
                     if key == ord("a"):
                         values.knn_update(2)
+                        print("team1")
                     elif key == ord("b"):
                         values.knn_update(3)
+                        print("team2")
                     elif key == ord("c"):
                         values.knn_update(4)
+                        print("judger")
                     else:
                         continue
                     break
@@ -503,6 +508,8 @@ if __name__ == "__main__":
                 tracking_object[i].losted += 1
                 if tracking_object[i].losted > 10:
                     fuck_delete.append(i)
+                if tracking_object[i].losted < 2 and knn_update == False and tracking_object[i].knn_classes > 1:
+                    get_data_from_video(frame, tracking_object[i].boxes, knn_numbers[tracking_object[i].knn_classes-2])
             for i in fuck_delete:
                 del tracking_object[i]
             fps.update()
@@ -519,6 +526,8 @@ if __name__ == "__main__":
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         # show the output frame
         cv2.imshow("Frame", frame)
-        cv2.waitKey(0)
+        cv2.waitKey(1)
     # close all windows
     cv2.destroyAllWindows()
+    for i in range(len(process)):
+        process[i].terminate()
