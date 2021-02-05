@@ -12,7 +12,7 @@ import time
 
 modelpath="knn_classes"
 online_data_save_path="knn_classes"
-
+classes_name = ["player", "ball", "team1", "team2", "judger"]
 class KNNClassifier:
 
     def __init__(self,modelpath=None):
@@ -48,7 +48,7 @@ class KNNClassifier:
         
         for i in range(k):
             pdict[distancelist[i][1]]+=1
-        return max(pdict, key=pdict.get)
+        return classes_name.index(max(pdict, key=pdict.get))
 
     def distance(self,p1,p2):
         vector1=np.array(p1)
@@ -74,8 +74,8 @@ def get_data_from_video(frame,box,i,classname,path=online_data_save_path):
     """
         从视频中获取前20帧的图像素材
     """
-    img=frame[box[1]:box[1]+box[3],box[0]:box[0]+box[2]]
-    p=os.path.join(path,classname[i%len(classname)],str(i)+".jpg")
+    img=frame[int(box[1]):int(box[1]+box[3]),int(box[0]):int(box[0]+box[2])]
+    p=os.path.join(path,classname,str(i)+".jpg")
     print(p)
     cv.imwrite(p,img)
     #i=i+1

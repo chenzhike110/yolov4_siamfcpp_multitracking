@@ -18,18 +18,14 @@ from PIL import Image
 # from Videoq import VideoCapture
 from edge import offside_dectet
 from ball_touch import ball_state
-
 from knnmodel import init_KNN, get_data_from_video, init_get_video
+from trackingobj import trackthing
 
 root_cfg.merge_from_file('./experiments/siamfcpp/siamfcpp_tinyconv.yaml')
 
-# resolve config
-task, task_cfg = specify_task(root_cfg)
-task_cfg.freeze()
-
 # construct the argument parser and parse the arguments
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video", type=str, default= "/home/jiangcx/桌面/足球视频/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
+ap.add_argument("-v", "--video", type=str, default= "../../SRTP/data/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
                 help="path to input video file")
 ap.add_argument("-t", "--tracker", type=str, default="kcf",
                 help="OpenCV object tracker type")
@@ -53,7 +49,11 @@ process_length = 3
 process_tracking_num = []
 knn_numbers = [0, 0, 0]
 process_to_insert = 0
-knn_update = False
+knn_updated = False
+knn_updating = False
+knn_updating_number = None
+mousex = 0
+mousey = 0
 # if a video path was not supplied, grab the reference to the web cam
 
 # initialize the FPS throughput estimator
@@ -69,7 +69,6 @@ fp=20
 process = []
 dataqueues = []
 resultqueues = []
-tracking_index = dict()
 
 hyper_params = dict(
     total_stride=8,
@@ -88,30 +87,13 @@ hyper_params = dict(
 )
 
 def get_point(event, x, y, flags, param):
-    global truex, truey, knn_update, tracking_object
-    print("initial knn")
+    global knn_updated,knn_updating,mousex,mousey
     if event == cv2.EVENT_LBUTTONDOWN:
-        if knn_update == True:
+        if knn_updated == True:
             return 
-        truex, truey = x, y
-        for values in tracking_object.values():
-            if  values.inbox(truex, truey):
-                print("add classes for this box")
-                while True:
-                    key = cv2.waitKey(0) & 0xFF
-                    if key == ord("a"):
-                        values.knn_update(2)
-                        print("team1")
-                    elif key == ord("b"):
-                        values.knn_update(3)
-                        print("team2")
-                    elif key == ord("c"):
-                        values.knn_update(4)
-                        print("judger")
-                    else:
-                        continue
-                    break
-
+        knn_updating = True
+        mousex = x
+        mousey = y
 
 def postprocess_score(score, box_wh, target_sz, scale_x, window):
     r"""
@@ -207,7 +189,7 @@ def restrict_box(im_h, im_w, target_pos, target_sz):
 
     return target_pos, target_sz
 
-def multiprocessing_update(index, im, dataqueue, resultqueue):
+def multiprocessing_update(task, task_cfg, index, im, dataqueue, resultqueue):
     # build model
     Model = model_builder.build_model(task, task_cfg.model).to(torch.device("cuda"))
     Model.eval()
@@ -276,8 +258,10 @@ def multiprocessing_update(index, im, dataqueue, resultqueue):
                         delete_node(node)
             
             result = []
+            im = im_x.copy()
+            del im_x, state, delete
             for i in range(len(features)):
-                im_x_crop, scale_x = get_crop(im_x, target_pos[i], target_sz[i], z_size, x_size=x_size, avg_chans=avg_chans,context_amount=context_amount, func_get_subwindow=get_subwindow_tracking)
+                im_x_crop, scale_x = get_crop(im, target_pos[i], target_sz[i], z_size, x_size=x_size, avg_chans=avg_chans,context_amount=context_amount, func_get_subwindow=get_subwindow_tracking)
                 array = torch.from_numpy(np.ascontiguousarray(im_x_crop.transpose(2, 0, 1)[np.newaxis, ...], np.float32)).to(torch.device("cuda"))
                 with torch.no_grad():
                     score, box, cls, ctr, *args = Model(array, *features[i], phase=phase_track)
@@ -305,7 +289,7 @@ def multiprocessing_update(index, im, dataqueue, resultqueue):
                 # return rect format
                 track_rect = cxywh2xywh(np.concatenate([target_pos[i], target_sz[i]],axis=-1))
                 result.append(track_rect)
-            del im_x
+            
             delete_list = []
             for i in range(len(features)):
                 if lost[i] > 10:
@@ -316,8 +300,8 @@ def multiprocessing_update(index, im, dataqueue, resultqueue):
             
             resultqueue.put([result, tracking_index])   
 
-def check(frame, result, yolo_objects):
-    global process_to_insert, process_tracking_num, dataqueues
+def check(frame, result, yolo_objects, dataqueues):
+    global process_to_insert, process_tracking_num
     temp = []
     for label, rect_box in result.items():
         if label in temp:
@@ -332,7 +316,7 @@ def check(frame, result, yolo_objects):
     if len(yolo_objects) == 0:
         return result, temp
     else:
-        for objects in yolo_object :
+        for objects in yolo_objects :
             if len(result) == tracking_num:
                 break
             objects = np.append(cxywh2xywh(objects[0:4]),objects[-1])
@@ -375,44 +359,15 @@ def update_yolo(frame, yolo1):
     initBB = yolo1.detect_image_without_draw(frame_clone) 
     return initBB 
 
-class trackthing(object):
-    def __init__(self, boxes, clss):
-        super().__init__()
-        self.boxes = boxes
-        self.classes = clss
-        self.knn_classes = -1
-        self.losted = 0
-    def get_boxes(self):
-        return self.boxes 
-    def get_class(self):
-        return self.classes
-    def inbox(self, x, y):
-        if x>=self.boxes[0] and x<=self.boxes[0]+self.boxes[2] and y>=self.boxes[1] and y<=self.boxes[1]+self.boxes[3]:
-            return True
-        return False
-    def update(self, boxes, clss = None):
-        self.boxes = boxes
-        self.losted = 0
-        if clss != None:
-            self.clss = clss
-    def knn_update(self, clss):
-        self.knn_classes = clss
-        self.classes = clss
-    def inbox_box(self, rect_box):
-        xmin = max(self.boxes[0],rect_box[0])
-        ymax = min(self.boxes[1]+self.boxes[3],rect_box[1]+rect_box[3])
-        xmax = min(self.boxes[0]+self.boxes[2],rect_box[0]+rect_box[2])
-        ymin = max(self.boxes[1],rect_box[1])
-        if ymax - ymin < 0 or xmax - xmin < 0:
-            return 0
-        return (ymax-ymin)*(xmax-xmin)/min(rect_box[2]*rect_box[3], self.boxes[2]*self.boxes[3])
-
 if __name__ == "__main__":
     torch.multiprocessing.set_start_method('forkserver', force=True)
-    knn_classifier = init_KNN("knn_classes")
+    # resolve config
+    task, task_cfg = specify_task(root_cfg)
+    task_cfg.freeze()
     init_get_video(classes_name[2:], "knn_classes")
     yolo_detect = 0
     yolo_update = False
+    knn_classifier = None
     yolo_object = []
     delete = []
     tracking_object = dict()
@@ -432,7 +387,7 @@ if __name__ == "__main__":
     for i in range(process_length):
         dataqueues.append(torch.multiprocessing.Queue())
         resultqueues.append(torch.multiprocessing.Queue())
-        process.append(torch.multiprocessing.Process(target=multiprocessing_update, args=(i, frame, dataqueues[-1], resultqueues[-1])))
+        process.append(torch.multiprocessing.Process(target=multiprocessing_update, args=(task, task_cfg, i, frame, dataqueues[-1], resultqueues[-1])))
         process[-1].start()
     if args["detect"] == "manual":
         initBB = initial_manuel(frame)     
@@ -450,7 +405,7 @@ if __name__ == "__main__":
         process_tracking_num.append(len(temp))
         dataqueues[i].put((frame, temp, []))
 
-    # cv2.setMouseCallback('Frame',get_point)
+    cv2.setMouseCallback('Frame',get_point)
     fps = FPS().start()
     while True:
         # VideoStream or VideoCapture object
@@ -463,10 +418,31 @@ if __name__ == "__main__":
         # resize the frame (so we can process it faster) and grab the
         frame = imutils.resize(frame, height=720, width=720)
         # frame = imutils.resize(frame, width=1000)
-
+        frame_clone = frame.copy()
         if len(initBB)>0:
             if args["detect"] != "manuel":
                 yolo_detect += 1
+            if knn_updating:
+                find = False
+                for index, values in tracking_object.items():
+                    if  values.inbox(mousex, mousey):
+                        knn_updating_number = index
+                        find = True
+                        break
+                if find:
+                    (x, y, w, h) = [int(v) for v in tracking_object[knn_updating_number].get_boxes()]
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 255 , 255), 1)
+                    cv2.imshow("Frame",frame)
+                    print("add classes for this box")
+                    key = cv2.waitKey(0) & 0xFF
+                    print(key)
+                    if key == ord(" "):
+                        tracking_object[knn_updating_number].knn_update(2)
+                    elif key == 13: #enter键
+                        tracking_object[knn_updating_number].knn_update(3)
+                    else:
+                        tracking_object[knn_updating_number].knn_update(4)
+                knn_updating = False
             for i in range(len(dataqueues)):
                 dataqueues[i].put((frame, [], delete))
             delete = []
@@ -490,51 +466,58 @@ if __name__ == "__main__":
                 yolo_object = update_yolo(frame, yolo1)
                 yolo_detect = 0
                 yolo_update = False
-            tracking_object, delete = check(frame, tracking_object, yolo_object)
+                
+            tracking_object, delete = check(frame, tracking_object, yolo_object, dataqueues)
             yolo_object = []     
-            if len(tracking_object) < tracking_num and yolo_detect > 1:
+            if len(tracking_object) < tracking_num and yolo_detect > 100:
                 yolo_update = True
 
-            ball_boxes = []
-            player_boxes = []
+            if knn_updated:
+                ball_boxes = []
+                player_boxes = []
             for i in tracking_object.keys():
                 if tracking_object[i].losted > 0:
                     continue
                 txt = int(tracking_object[i].get_class())
                 (x, y, w, h) = [int(v) for v in tracking_object[i].get_boxes()]
-                if txt == 0:
-                    player_boxes.append([x,y,w,h])
-                elif txt == 1:
-                    ball_boxes.append([x,y,w,h])
-
+                if knn_updated:
+                    if txt == 0:
+                        player_boxes.append([x,y,w,h])
+                    elif txt == 1:
+                        ball_boxes.append([x,y,w,h])
+                if knn_updated and tracking_object[i].knn_classes == -1:
+                    tracking_object[i].knn_update(knn_classifier.prediction(frame[int(y):int(y+h),int(x):int(x+w)]))
 
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255 - txt*50, txt*50), 2)
                 cv2.putText(frame, "{}".format(txt), (x + w//2, y + h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255 - txt*50, txt*50), 1)
                 cv2.putText(frame, i.format(txt), (x + w//2, y - h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255 - txt*50, txt*50), 1)
                 tracking_object[i].updated = False
+            if knn_updated:
+                ball_boxes = np.array(ball_boxes)
+                player_boxes = np.array(player_boxes)
+                # state = 0:检测到大于一个球;1:触球;2:有球但未触球;3:球出边界所以没识别到;4:还未第一次检测到球;5:球在场内但没识别到
+                state,touch_person = ball_state(frame, ball_boxes, player_boxes)
 
-            ball_boxes = np.array(ball_boxes)
-            player_boxes = np.array(player_boxes)
-            # state = 0:检测到大于一个球;1:触球;2:有球但未触球;3:球出边界所以没识别到;4:还未第一次检测到球;5:球在场内但没识别到
-            state,touch_person = ball_state(frame, ball_boxes, player_boxes)
-
-            #之后要通过touch_person判进攻or防守队伍
-
-            if state == 2:  #之后要改成1
-                has_line, has_offside = offside_dectet(frame, 'up', touch_person[0], touch_person[1],player_boxes) #之后player_boxes要改成防守队伍的boxes
+                #之后要通过touch_person判进攻or防守队伍
+                if state == 2:  #之后要改成1
+                    has_line, has_offside = offside_dectet(frame, 'up', touch_person[0], touch_person[1],player_boxes) #之后player_boxes要改成防守队伍的boxes
             # update the FPS counter
             fuck_delete = []
             for i in tracking_object.keys():
                 tracking_object[i].losted += 1
                 if tracking_object[i].losted > 10:
                     fuck_delete.append(i)
-                if tracking_object[i].losted < 2 and knn_update == False and tracking_object[i].knn_classes > 1:
-                    get_data_from_video(frame, tracking_object[i].boxes, knn_numbers[tracking_object[i].knn_classes-2])
+                    continue
+                if tracking_object[i].losted < 2 and knn_updated == False and tracking_object[i].knn_classes > 1 and knn_numbers[tracking_object[i].knn_classes-2]<25:
+                    get_data_from_video(frame_clone, tracking_object[i].boxes, knn_numbers[tracking_object[i].knn_classes-2], classes_name[tracking_object[i].knn_classes], path="./knn_classes")
+                    knn_numbers[tracking_object[i].knn_classes-2] += 1
             for i in fuck_delete:
                 del tracking_object[i]
             fps.update()
             fps.stop()
-            
+            if sum(knn_numbers)>=75:
+                knn_updated = True
+                knn_classifier = init_KNN("knn_classes")
             info = [
                 ("Tracker", "siamfcpp"),
                 ("FPS", "{:.2f}".format(fps.fps())),
@@ -551,3 +534,4 @@ if __name__ == "__main__":
     cv2.destroyAllWindows()
     for i in range(len(process)):
         process[i].terminate()
+        process[i].kill()
