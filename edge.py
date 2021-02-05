@@ -7,7 +7,21 @@ import math
 # 使用霍夫直线变换做直线检测，前提条件：边缘检测已经完成
 
 # 统计概率霍夫线变换
-def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer_x, dfplayer_y):
+def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer):
+    # 找最后一名防守球员
+    if direction == 'left':
+        dfplayer_x = dfplayer[np.argmin(dfplayer[:,0]),0]
+        dfplayer_y = dfplayer[np.argmin(dfplayer[:, 0]),1]
+    elif direction == 'right':
+        dfplayer_x = dfplayer[np.argmax(dfplayer[:,0]),0]
+        dfplayer_y = dfplayer[np.argmax(dfplayer[:, 0]),1]
+    elif direction == 'up':
+        dfplayer_x = dfplayer[np.argmin(dfplayer[:,1]),0]
+        dfplayer_y = dfplayer[np.argmin(dfplayer[:, 1]),1]
+    elif direction == 'down':
+        dfplayer_x = dfplayer[np.argmax(dfplayer[:,1]),0]
+        dfplayer_y = dfplayer[np.argmax(dfplayer[:, 1]),1]
+
     has_offside = 0
     th = 10  # 边缘检测后大于th的才算边界
 
@@ -20,7 +34,7 @@ def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer_x, dfplaye
     absY = cv2.convertScaleAbs(y)
     edges = cv2.addWeighted(absX, 0.5, absY, 0.5, 0)  # 各0.5的权重将两个梯度叠加
     dst, edges = cv2.threshold(edges, th, 255, cv2.THRESH_BINARY)  # 大于th的赋值255（白色）
-    cv2.imshow('edge', edges)
+    # cv2.imshow('edge', edges)
 
     # 函数将通过步长为1的半径和步长为π/180的角来搜索所有可能的直线
     lines = cv2.HoughLinesP(edges, 1, np.pi / 180, 255, minLineLength=min(gray.shape[0], gray.shape[1]) - 100,
@@ -74,7 +88,7 @@ def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer_x, dfplaye
 
             # 越位判罚
             line_x = ofplayer_y - (dfplayer_y - k * dfplayer_x) / k
-            line_y = k * ofplayer_x - k * ofplayer_x + ofplayer_y
+            line_y = k * ofplayer_x - k * dfplayer_x + dfplayer_y
             if direction == 'left':
                 if line_x > ofplayer_x:
                     has_offside = 1
@@ -82,25 +96,13 @@ def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer_x, dfplaye
                 if line_x < ofplayer_x:
                     has_offside = 1
             elif direction == 'up':
-                if line_y < ofplayer_y:
-                    has_offside = 1
-            elif direction == 'down':
                 if line_y > ofplayer_y:
                     has_offside = 1
+            elif direction == 'down':
+                if line_y < ofplayer_y:
+                    has_offside = 1
         cv2.imshow("line_detect_possible_demo", image)
-    return has_line, has_offside
 
-
-if __name__ == "__main__":
-    cap = cv2.VideoCapture('/home/jiangcx/桌面/足球视频/video8.mp4')
-    while (cap.isOpened()):
-        print('-----frame#-----')
-        ret, img = cap.read()
-        cv2.imshow('original', img)
-        # img = cv2.imread('edge16.png')
-
-        # （图像，向哪个方向进攻(left & right)，进攻球员x，进攻球员y，防守球员x，防守球员y
-        has_line, has_offside = offside_dectet(img, 'left', 10, 20, 100, 200)
         if has_line == 1:
             print('has_line')
             if has_offside == 1:
@@ -109,6 +111,6 @@ if __name__ == "__main__":
                 print('不越位')
         else:
             print("no_line")
+    return has_line, has_offside
 
-        cv2.waitKey(1)
-    cv2.destroyAllWindows()
+

@@ -17,6 +17,7 @@ from PIL import Image
 
 # from Videoq import VideoCapture
 from edge import offside_dectet
+from ball_touch import ball_state
 
 from knnmodel import init_KNN, get_data_from_video, init_get_video
 
@@ -28,7 +29,7 @@ task_cfg.freeze()
 
 # construct the argument parser and parse the arguments
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video", type=str, default= "../../SRTP/data/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
+ap.add_argument("-v", "--video", type=str, default= "/home/jiangcx/桌面/足球视频/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
                 help="path to input video file")
 ap.add_argument("-t", "--tracker", type=str, default="kcf",
                 help="OpenCV object tracker type")
@@ -420,7 +421,7 @@ if __name__ == "__main__":
     frame = vs.read()
     frame = frame[1] if args.get("video", False) else frame
     print(frame.shape[1], frame.shape[0])
-    frame = frame[80:-80,240:-240]
+    frame = frame[:,240:-240]
     cv2.namedWindow('Frame')
     frame = imutils.resize(frame, height=720, width=720)
     for i in range(process_length):
@@ -450,7 +451,7 @@ if __name__ == "__main__":
         # VideoStream or VideoCapture object
         frame = vs.read()
         frame = frame[1] if args.get("video", False) else frame
-        frame = frame[80:-80,240:-240]
+        frame = frame[:,240:-240]
         # check to see if we have reached the end of the stream
         if frame is None:
             break
@@ -486,17 +487,36 @@ if __name__ == "__main__":
                 yolo_update = False
             tracking_object, delete = check(frame, tracking_object, yolo_object)
             yolo_object = []     
-            if len(tracking_object) < tracking_num and yolo_detect > 100:
+            if len(tracking_object) < tracking_num and yolo_detect > 1:
                 yolo_update = True
+
+            ball_boxes = []
+            player_boxes = []
             for i in tracking_object.keys():
                 if tracking_object[i].losted > 0:
                     continue
                 txt = int(tracking_object[i].get_class())
                 (x, y, w, h) = [int(v) for v in tracking_object[i].get_boxes()]
+                if txt == 0:
+                    player_boxes.append([x,y,w,h])
+                elif txt == 1:
+                    ball_boxes.append([x,y,w,h])
+
+
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255 - txt*50, txt*50), 2)
                 cv2.putText(frame, "{}".format(txt), (x + w//2, y + h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255 - txt*50, txt*50), 1)
                 cv2.putText(frame, i.format(txt), (x + w//2, y - h//2), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255 - txt*50, txt*50), 1)
                 tracking_object[i].updated = False
+
+            ball_boxes = np.array(ball_boxes)
+            player_boxes = np.array(player_boxes)
+            # state = 0:检测到大于一个球;1:触球;2:有球但未触球;3:球出边界所以没识别到;4:还未第一次检测到球;5:球在场内但没识别到
+            state,touch_person = ball_state(frame, ball_boxes, player_boxes)
+
+            #之后要通过touch_person判进攻or防守队伍
+
+            if state == 2:  #之后要改成1
+                has_line, has_offside = offside_dectet(frame, 'up', touch_person[0], touch_person[1],player_boxes) #之后player_boxes要改成防守队伍的boxes
             # update the FPS counter
             fuck_delete = []
             for i in tracking_object.keys():
@@ -522,3 +542,5 @@ if __name__ == "__main__":
         cv2.waitKey(0)
     # close all windows
     cv2.destroyAllWindows()
+    for i in range(len(process)):
+        process[i].terminate()
