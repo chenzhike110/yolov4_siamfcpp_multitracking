@@ -2,11 +2,14 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+from tqdm import tqdm
+from numba import jit
 
 
 # 使用霍夫直线变换做直线检测，前提条件：边缘检测已经完成
 
 # 统计概率霍夫线变换
+@jit(nopython=True)
 def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer):
     # 找最后一名防守球员
     if direction == 'left':
@@ -45,8 +48,8 @@ def offside_dectet(image, direction, ofplayer_x, ofplayer_y, dfplayer):
         has_line = 0
     else:
         has_line = 1
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
+        for i in tqdm(range(lenth(lines))):
+            x1, y1, x2, y2 = lines[i]
             angle_per = math.atan((y2 - y1) / (x2 - x1))  # 角度
             if angle_per < -np.pi / 4:  # 将角度换到-pi/4 ~ 3pi/4
                 angle_per = angle_per + np.pi

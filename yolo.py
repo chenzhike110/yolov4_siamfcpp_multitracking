@@ -24,7 +24,7 @@ from utils.utils import (DecodeBox, bbox_iou, letterbox_image,
 #--------------------------------------------#
 class YOLO(object):
     _defaults = {
-        "model_path"        : 'logs/Epoch50-Total_Loss14.4259-Val_Loss12.0760.pth',
+        "model_path"        : 'models/yolo/yolov4.pth',
         "anchors_path"      : 'model_data/my_anchor.txt',
         "classes_path"      : 'model_data/my_classes.txt',
         "model_image_size"  : (608, 608, 3),

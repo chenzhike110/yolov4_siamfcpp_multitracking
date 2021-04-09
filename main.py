@@ -1,31 +1,44 @@
-import torch
+from torch import torch
+import argparse
 
+# tracking
 from videoanalyst.config.config import cfg as root_cfg
 from videoanalyst.config.config import specify_task
 from videoanalyst.model import builder as model_builder
 from videoanalyst.pipeline import builder as pipeline_builder
 from videoanalyst.pipeline.utils import xywh2cxywh, get_crop, get_subwindow_tracking, tensor_to_numpy, xyxy2cxywh, cxywh2xywh
+import imutils
 from imutils.video import VideoStream
 from imutils.video import FPS
-import argparse
-import imutils
-import time
-import numba
 from cv2 import cv2
 import numpy as np
 from PIL import Image
-
-# from Videoq import VideoCapture
-from edge import offside_dectet
-from ball_touch import ball_state
-from knnmodel import init_KNN, get_data_from_video, init_get_video
 from trackingobj import trackthing
 
+
+# multi Thread
+from numba import config, njit, threading_layer, jit
+import numba
+from util import hyper_params, postprocess_box, postprocess_score, restrict_box
+import threading
+from tqdm import tqdm
+from queue import Queue
+
+import time
+
+# classification
+from knnmodel import init_KNN, get_data_from_video, init_get_video
+from edge import offside_dectet
+from ball_touch import ball_state
+
 root_cfg.merge_from_file('./experiments/siamfcpp/siamfcpp_tinyconv.yaml')
+task, task_cfg = specify_task(root_cfg)
+task_cfg.freeze()
+
 
 # construct the argument parser and parse the arguments
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video", type=str, default= "../../SRTP/data/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
+ap.add_argument("-v", "--video", type=str, default= "./video/video5.mp4",#"rtmp://192.168.43.109:9999/live/test"
                 help="path to input video file")
 ap.add_argument("-t", "--tracker", type=str, default="kcf",
                 help="OpenCV object tracker type")
@@ -33,18 +46,9 @@ ap.add_argument("-d", "--detect", type=str, default="yolo",
                 help="choose yolo or manul anchor at first")
 args = vars(ap.parse_args())
 
-# extract the OpenCV version info
-# My opencv：4.1.0
-(major, minor) = cv2.__version__.split(".")[:2]
-
-# if we are using OpenCV 3.2 OR BEFORE, we can use a special factory
-# function to create our object tracker
-
-# initialize the bounding box coordinates of the object we are going
-# to track
 classes_name = ["player", "ball", "team1", "team2", "judger"]
 initBB = []
-tracking_num = 20
+tracking_num = 50
 process_length = 3
 process_tracking_num = []
 knn_numbers = [0, 0, 0]
@@ -54,37 +58,14 @@ knn_updating = False
 knn_updating_number = None
 mousex = 0
 mousey = 0
-# if a video path was not supplied, grab the reference to the web cam
 
-# initialize the FPS throughput estimator
 fps = None
-# height=int(vs.get(cv2.CAP_PROP_FRAME_WIDTH ))#640
-# width=int(vs.get(cv2.CAP_PROP_FRAME_HEIGHT))# 480
-fp=20
 
-# fourcc = cv2.VideoWriter_fourcc(*'XVID')   
-# out = cv2.VideoWriter('out.avi', fourcc, fp, (int(width),int(height)))
-
-# multiprocessing settings
+# Thread pool
+config.THREADING_LAYER = 'threadsafe'
 process = []
 dataqueues = []
 resultqueues = []
-
-hyper_params = dict(
-    total_stride=8,
-    context_amount=0.5,
-    test_lr=0.52,
-    penalty_k=0.04,
-    window_influence=0.21,
-    windowing="cosine",
-    z_size=127,
-    x_size=303,
-    num_conv3x3=3,
-    min_w=10,
-    min_h=10,
-    phase_init="feature",
-    phase_track="track",
-)
 
 def get_point(event, x, y, flags, param):
     global knn_updated,knn_updating,mousex,mousey
@@ -94,100 +75,6 @@ def get_point(event, x, y, flags, param):
         knn_updating = True
         mousex = x
         mousey = y
-
-def postprocess_score(score, box_wh, target_sz, scale_x, window):
-    r"""
-    Perform SiameseRPN-based tracker's post-processing of score
-    :param score: (HW, ), score prediction
-    :param box_wh: (HW, 4), cxywh, bbox prediction (format changed)
-    :param target_sz: previous state (w & h)
-    :param scale_x:
-    :return:
-        best_pscore_id: index of chosen candidate along axis HW
-        pscore: (HW, ), penalized score
-        penalty: (HW, ), penalty due to scale/ratio change
-    """
-    def change(r):
-        return np.maximum(r, 1. / r)
-
-    def sz(w, h):
-        pad = (w + h) * 0.5
-        sz2 = (w + pad) * (h + pad)
-        return np.sqrt(sz2)
-
-    def sz_wh(wh):
-        pad = (wh[0] + wh[1]) * 0.5
-        sz2 = (wh[0] + pad) * (wh[1] + pad)
-        return np.sqrt(sz2)
-
-    # size penalty
-    penalty_k = hyper_params['penalty_k']
-    target_sz_in_crop = target_sz * scale_x
-    s_c = change(
-        sz(box_wh[:, 2], box_wh[:, 3]) /
-        (sz_wh(target_sz_in_crop)))  # scale penalty
-    r_c = change((target_sz_in_crop[0] / target_sz_in_crop[1]) /
-                    (box_wh[:, 2] / box_wh[:, 3]))  # ratio penalty
-    penalty = np.exp(-(r_c * s_c - 1) * penalty_k)
-    pscore = penalty * score
-
-    # ipdb.set_trace()
-    # cos window (motion model)
-    window_influence = hyper_params['window_influence']
-    pscore = pscore * (
-        1 - window_influence) + window * window_influence
-    best_pscore_id = np.argmax(pscore)
-
-    return best_pscore_id, pscore, penalty
-
-def postprocess_box(best_pscore_id, score, box_wh, target_pos, target_sz, scale_x, x_size, penalty):
-    r"""
-    Perform SiameseRPN-based tracker's post-processing of box
-    :param score: (HW, ), score prediction
-    :param box_wh: (HW, 4), cxywh, bbox prediction (format changed)
-    :param target_pos: (2, ) previous position (x & y)
-    :param target_sz: (2, ) previous state (w & h)
-    :param scale_x: scale of cropped patch of current frame
-    :param x_size: size of cropped patch
-    :param penalty: scale/ratio change penalty calculated during score post-processing
-    :return:
-        new_target_pos: (2, ), new target position
-        new_target_sz: (2, ), new target size
-    """
-    pred_in_crop = box_wh[best_pscore_id, :] / np.float32(scale_x)
-    # about np.float32(scale_x)
-    # attention!, this casting is done implicitly
-    # which can influence final EAO heavily given a model & a set of hyper-parameters
-
-    # box post-postprocessing
-    test_lr = hyper_params['test_lr']
-    lr = penalty[best_pscore_id] * score[best_pscore_id] * test_lr
-    res_x = pred_in_crop[0] + target_pos[0] - (x_size // 2) / scale_x
-    res_y = pred_in_crop[1] + target_pos[1] - (x_size // 2) / scale_x
-    res_w = target_sz[0] * (1 - lr) + pred_in_crop[2] * lr
-    res_h = target_sz[1] * (1 - lr) + pred_in_crop[3] * lr
-
-    new_target_pos = np.array([res_x, res_y])
-    new_target_sz = np.array([res_w, res_h])
-
-    return new_target_pos, new_target_sz
-
-def restrict_box(im_h, im_w, target_pos, target_sz):
-    r"""
-    Restrict target position & size
-    :param target_pos: (2, ), target position
-    :param target_sz: (2, ), target size
-    :return:
-        target_pos, target_sz
-    """
-    target_pos[0] = max(0, min(im_w, target_pos[0]))
-    target_pos[1] = max(0, min(im_h, target_pos[1]))
-    target_sz[0] = max(hyper_params['min_w'],
-                        min(im_w, target_sz[0]))
-    target_sz[1] = max(hyper_params['min_h'],
-                        min(im_h, target_sz[1]))
-
-    return target_pos, target_sz
 
 def multiprocessing_update(task, task_cfg, index, im, dataqueue, resultqueue):
     # build model
@@ -253,7 +140,7 @@ def multiprocessing_update(task, task_cfg, index, im, dataqueue, resultqueue):
                 delete_list = []
                 for i in delete:
                     if i in tracking_index:
-                        print("delete",i)
+                        # print("delete",i)
                         node = tracking_index.index(i)
                         delete_node(node)
             
@@ -297,7 +184,7 @@ def multiprocessing_update(task, task_cfg, index, im, dataqueue, resultqueue):
                     delete_list.append(i)
             for i in delete_list:
                 delete_node(i)
-            
+            # print(index, len(features))
             resultqueue.put([result, tracking_index])   
 
 def check(frame, result, yolo_objects, dataqueues):
@@ -316,23 +203,27 @@ def check(frame, result, yolo_objects, dataqueues):
     if len(yolo_objects) == 0:
         return result, temp
     else:
-        for objects in yolo_objects :
+        print(yolo_objects)
+        add_object = [[]for i in range(process_length)]
+        for objects in yolo_objects:
             if len(result) == tracking_num:
                 break
             objects = np.append(cxywh2xywh(objects[0:4]),objects[-1])
             need = True
-            for rect_box in result.values():
-                IOU = rect_box.inbox_box(objects[0:4])
-                print("iou",IOU)
-                if IOU > 0.9:
-                    need = False
-                    break
+            if(objects[-1]<1):
+                for rect_box in result.values():
+                    IOU = rect_box.inbox_box(objects[0:4])
+                    if IOU > 0.9:
+                        need = False
+                        break
             if need:
-                print("update",process_to_insert*100+process_tracking_num[process_to_insert], process_to_insert)
+                # print("update",process_to_insert*100+process_tracking_num[process_to_insert], process_to_insert)
                 result[str(process_to_insert*100+process_tracking_num[process_to_insert])] = trackthing(objects[0:4],objects[-1])
-                dataqueues[process_to_insert].put((frame, [objects], []))
+                add_object[process_to_insert].append(objects)
                 process_tracking_num[process_to_insert] += 1
                 process_to_insert = (process_to_insert+1)%process_length
+        for i in range(process_length):
+            dataqueues[i].put((frame, add_object[i], []))
         return result, temp
 
 def initial_manuel(frame):
@@ -475,9 +366,15 @@ if __name__ == "__main__":
             if knn_updated:
                 ball_boxes = []
                 player_boxes = []
+            fuck_delete = [] 
             for i in tracking_object.keys():
-                if tracking_object[i].losted > 0:
+                tracking_object[i].losted += 1
+                if tracking_object[i].losted > 10:
+                    fuck_delete.append(i)
                     continue
+                if tracking_object[i].losted < 2 and knn_updated == False and tracking_object[i].knn_classes > 1 and knn_numbers[tracking_object[i].knn_classes-2]<25:
+                    get_data_from_video(frame_clone, tracking_object[i].boxes, knn_numbers[tracking_object[i].knn_classes-2], classes_name[tracking_object[i].knn_classes], path="./knn_classes")
+                    knn_numbers[tracking_object[i].knn_classes-2] += 1
                 txt = int(tracking_object[i].get_class())
                 (x, y, w, h) = [int(v) for v in tracking_object[i].get_boxes()]
                 if knn_updated:
@@ -502,15 +399,7 @@ if __name__ == "__main__":
                 if state == 2:  #之后要改成1
                     has_line, has_offside = offside_dectet(frame, 'up', touch_person[0], touch_person[1],player_boxes) #之后player_boxes要改成防守队伍的boxes
             # update the FPS counter
-            fuck_delete = []
-            for i in tracking_object.keys():
-                tracking_object[i].losted += 1
-                if tracking_object[i].losted > 10:
-                    fuck_delete.append(i)
-                    continue
-                if tracking_object[i].losted < 2 and knn_updated == False and tracking_object[i].knn_classes > 1 and knn_numbers[tracking_object[i].knn_classes-2]<25:
-                    get_data_from_video(frame_clone, tracking_object[i].boxes, knn_numbers[tracking_object[i].knn_classes-2], classes_name[tracking_object[i].knn_classes], path="./knn_classes")
-                    knn_numbers[tracking_object[i].knn_classes-2] += 1
+
             for i in fuck_delete:
                 del tracking_object[i]
             fps.update()

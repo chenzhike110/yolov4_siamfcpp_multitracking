@@ -1,3 +1,4 @@
+from numba import jit 
 
 class trackthing(object):
     def __init__(self, boxes, clss):
